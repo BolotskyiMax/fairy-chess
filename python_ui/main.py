@@ -12,8 +12,9 @@ from PyQt6.QtWidgets import (
 
 
 class EngineAdapter:
-    def __init__(self, executable_path: str = "chess_engine.exe"):
-        self.executable_path = executable_path
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.executable_path = os.path.join(base_dir, "cpp_engine", "chess_engine.exe")
         self.process = None
         self._start_engine()
 
