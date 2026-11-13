@@ -1,190 +1,233 @@
+"""Fairy Chess - PyQt6 GUI. All game rules live in the C++ engine; this file only shows them."""
+from __future__ import annotations
+
 import os
 import sys
-import json
-import subprocess
-from PyQt6.QtCore import Qt, QRectF
-from PyQt6.QtGui import QPainter, QColor
-from PyQt6.QtSvg import QSvgRenderer
+from typing import Optional
+
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QComboBox, QListWidget
+    QApplication, QHBoxLayout, QLabel, QListWidget, QMainWindow,
+    QMessageBox, QPushButton, QVBoxLayout, QWidget,
 )
 
+from board_widget import ChessBoardWidget
+from engine_adapter import EngineAdapter, EngineError
+from promotion_dialog import PromotionDialog
 
-class EngineAdapter:
-    def __init__(self):
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.executable_path = os.path.join(base_dir, "cpp_engine", "chess_engine.exe")
-        self.process = None
-        self._start_engine()
+PIECES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pieces")
 
-    def _start_engine(self):
-        if os.path.exists(self.executable_path):
-            self.process = subprocess.Popen(
-                [self.executable_path],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                text=True,
-                bufsize=1
-            )
-
-    def send_command(self, payload: dict) -> dict:
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.stdin.write(json.dumps(payload) + "\n")
-                self.process.stdin.flush()
-                line = self.process.stdout.readline().strip()
-                if line:
-                    return json.loads(line)
-            except Exception:
-                pass
-        preset = payload.get("preset", 0)
-        if preset == 0:
-            return {
-                "status": "ok",
-                "bitboards": {
-                    "bR": (1 << 0) | (1 << 7),
-                    "bN": (1 << 1) | (1 << 6),
-                    "bB": (1 << 2) | (1 << 5),
-                    "bQ": (1 << 3),
-                    "bK": (1 << 4),
-                    "bP": 0x000000000000FF00,
-                    "wP": 0x00FF000000000000,
-                    "wR": (1 << 56) | (1 << 63),
-                    "wN": (1 << 57) | (1 << 62),
-                    "wB": (1 << 58) | (1 << 61),
-                    "wQ": (1 << 59),
-                    "wK": (1 << 60),
-                }
-            }
-        else:
-            return {
-                "status": "ok",
-                "bitboards": {
-                    "bN": (1 << 0) | (1 << 7),
-                    "bR": (1 << 1) | (1 << 6),
-                    "bB": (1 << 2) | (1 << 5) | (1 << 11) | (1 << 12),
-                    "bQ": (1 << 3),
-                    "bK": (1 << 4),
-                    "bP": 0x000000000000E700,
-                    "wP": 0x00E7000000000000,
-                    "wN": (1 << 56) | (1 << 63),
-                    "wR": (1 << 57) | (1 << 62),
-                    "wB": (1 << 58) | (1 << 61) | (1 << 51) | (1 << 52),
-                    "wQ": (1 << 59),
-                    "wK": (1 << 60),
-                }
-            }
-
-
-class ChessBoardWidget(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumSize(640, 640)
-        self.bitboards: dict[str, int] = {}
-        self.svg_cache: dict[str, QSvgRenderer] = {}
-        self._load_svgs()
-
-    def _load_svgs(self):
-        pieces_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Pieces")
-        for code in ["wP", "wN", "wB", "wR", "wQ", "wK", "bP", "bN", "bB", "bR", "bQ", "bK"]:
-            path = os.path.join(pieces_dir, f"{code}.svg")
-            if os.path.exists(path):
-                self.svg_cache[code] = QSvgRenderer(path)
-
-    def set_bitboards(self, bitboards: dict[str, int]):
-        self.bitboards = {k: int(v) for k, v in bitboards.items()}
-        self.update()
-
-    def _get_piece_at_square(self, sq_index: int) -> str:
-        mask = 1 << sq_index
-        for piece_code, bb in self.bitboards.items():
-            if bb & mask:
-                return piece_code
-        return ""
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        board_size = min(self.width(), self.height()) - 24
-        sq_size = board_size / 8.0
-        offset_x = (self.width() - board_size) / 2.0
-        offset_y = (self.height() - board_size) / 2.0
-
-        light_color = QColor("#EBECD0")
-        dark_color = QColor("#739552")
-
-        for r in range(8):
-            for c in range(8):
-                sq_index = r * 8 + c
-                x = offset_x + c * sq_size
-                y = offset_y + r * sq_size
-                rect = QRectF(x, y, sq_size, sq_size)
-
-                painter.fillRect(rect, light_color if (r + c) % 2 == 0 else dark_color)
-
-                piece_code = self._get_piece_at_square(sq_index)
-                if piece_code and piece_code in self.svg_cache:
-                    margin = sq_size * 0.08
-                    piece_rect = QRectF(x + margin, y + margin, sq_size - 2 * margin, sq_size - 2 * margin)
-                    self.svg_cache[piece_code].render(painter, piece_rect)
+GLYPHS = {
+    "wK": "♔", "wQ": "♕", "wR": "♖", "wB": "♗", "wN": "♘", "wP": "♙",
+    "bK": "♚", "bQ": "♛", "bR": "♜", "bB": "♝", "bN": "♞", "bP": "♟",
+}
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, adapter: EngineAdapter):
         super().__init__()
         self.setWindowTitle("Fairy Chess")
-        self.resize(940, 680)
-        self.engine = EngineAdapter()
+        self.resize(1000, 700)
+        self._adapter = adapter
+        self._state: Optional[dict] = None
         self._init_ui()
-        self._load_setup(0)
+        self._start_engine()
 
-    def _init_ui(self):
+    # ------------------------------------------------------------ UI
+
+    def _init_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
         layout = QHBoxLayout(central)
 
-        self.board_widget = ChessBoardWidget()
+        self.board_widget = ChessBoardWidget(PIECES_DIR)
+        self.board_widget.move_requested.connect(self._on_move_requested)
+        self.board_widget.selection_changed.connect(self._on_selection_changed)
         layout.addWidget(self.board_widget, stretch=3)
 
-        side_panel = QVBoxLayout()
+        side = QVBoxLayout()
+        side.addWidget(QLabel("Mode: Player vs Player (Hotseat)"))
 
-        side_panel.addWidget(QLabel("Game Mode:"))
-        self.mode_selector = QComboBox()
-        self.mode_selector.addItems(["Player vs Player (Hotseat)", "Player vs Computer (Minimax AI)"])
-        side_panel.addWidget(self.mode_selector)
+        self.new_game_btn = QPushButton("New Game")
+        self.new_game_btn.clicked.connect(self._on_new_game)
+        side.addWidget(self.new_game_btn)
 
-        side_panel.addWidget(QLabel("Starting Setup:"))
-        self.setup_selector = QComboBox()
-        self.setup_selector.addItems(["Standard Setup", "Fairy Setup"])
-        self.setup_selector.currentIndexChanged.connect(self._load_setup)
-        side_panel.addWidget(self.setup_selector)
+        self.status_label = QLabel()
+        status_font = QFont(self.font())
+        status_font.setPointSize(status_font.pointSize() + 3)
+        status_font.setBold(True)
+        self.status_label.setFont(status_font)
+        self.status_label.setWordWrap(True)
+        side.addWidget(self.status_label)
 
-        side_panel.addWidget(QLabel("Move History:"))
+        side.addWidget(QLabel("Move History:"))
         self.history_list = QListWidget()
-        side_panel.addWidget(self.history_list)
+        mono = QFont("Consolas")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        self.history_list.setFont(mono)
+        side.addWidget(self.history_list, stretch=1)
 
-        btn_layout = QHBoxLayout()
+        buttons = QHBoxLayout()
         self.undo_btn = QPushButton("Undo")
         self.redo_btn = QPushButton("Redo")
-        self.undo_btn.setEnabled(False)
-        self.redo_btn.setEnabled(False)
-        btn_layout.addWidget(self.undo_btn)
-        btn_layout.addWidget(self.redo_btn)
-        side_panel.addLayout(btn_layout)
+        self.undo_btn.clicked.connect(self._on_undo)
+        self.redo_btn.clicked.connect(self._on_redo)
+        buttons.addWidget(self.undo_btn)
+        buttons.addWidget(self.redo_btn)
+        side.addLayout(buttons)
 
-        layout.addLayout(side_panel, stretch=1)
+        self.material_label = QLabel()
+        self.captured_white_label = QLabel()
+        self.captured_black_label = QLabel()
+        glyph_font = QFont(self.font())
+        glyph_font.setPointSize(glyph_font.pointSize() + 4)
+        for label in (self.captured_white_label, self.captured_black_label):
+            label.setFont(glyph_font)
+            label.setWordWrap(True)
+        side.addWidget(self.material_label)
+        side.addWidget(self.captured_white_label)
+        side.addWidget(self.captured_black_label)
 
-    def _load_setup(self, preset_index: int):
-        resp = self.engine.send_command({"cmd": "init", "preset": preset_index})
-        bitboards = resp.get("bitboards", {})
-        self.board_widget.set_bitboards(bitboards)
+        side.addWidget(QLabel("Selected piece:"))
+        self.piece_info = QLabel("Click any piece to inspect it.")
+        self.piece_info.setWordWrap(True)
+        side.addWidget(self.piece_info)
+
+        layout.addLayout(side, stretch=1)
+        self._set_controls_enabled(False)
+
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        can_undo = enabled and bool(self._state and self._state.get("can_undo"))
+        can_redo = enabled and bool(self._state and self._state.get("can_redo"))
+        self.undo_btn.setEnabled(can_undo)
+        self.redo_btn.setEnabled(can_redo)
+        self.new_game_btn.setEnabled(enabled)
+        self.board_widget.set_interactive(enabled)
+
+    # ------------------------------------------------------------ engine communication
+
+    def _start_engine(self) -> None:
+        try:
+            self._adapter.start()
+            self._apply(self._adapter.send({"cmd": "new_game"}))
+        except EngineError as exc:
+            self._engine_unavailable(str(exc))
+
+    def _request(self, payload: dict) -> bool:
+        """Fast synchronous request (moves, undo...). Returns True if the engine accepted it."""
+        try:
+            response = self._adapter.send(payload)
+        except EngineError as exc:
+            self._engine_failed(str(exc))
+            return False
+        if response.get("status") != "ok":
+            self.statusBar().showMessage(response.get("message", "Engine error"), 4000)
+            return False
+        self._apply(response)
+        return True
+
+    def _engine_failed(self, message: str) -> None:
+        QMessageBox.critical(self, "Engine error",
+                             f"{message}\n\nThe engine will be restarted with a new game.")
+        try:
+            self._adapter.restart()
+            self._apply(self._adapter.send({"cmd": "new_game"}))
+        except EngineError as exc:
+            self._engine_unavailable(str(exc))
+
+    def _engine_unavailable(self, message: str) -> None:
+        self._state = None
+        self._set_controls_enabled(False)
+        self.status_label.setText("Engine unavailable")
+        QMessageBox.critical(self, "Engine error", message)
+
+    # ------------------------------------------------------------ state -> widgets
+
+    def _apply(self, state: dict) -> None:
+        self._state = state
+        self.board_widget.set_state(state)
+        self._update_history(state.get("history", []))
+        self.status_label.setText(self._status_text(state))
+
+        material = state.get("material", {})
+        self.material_label.setText(
+            f"Material: White {material.get('white', 0)}  ·  Black {material.get('black', 0)}")
+        captured = state.get("captured", {})
+        self.captured_white_label.setText(
+            "White took: " + " ".join(GLYPHS.get(c, c) for c in captured.get("white", [])))
+        self.captured_black_label.setText(
+            "Black took: " + " ".join(GLYPHS.get(c, c) for c in captured.get("black", [])))
+
+        self._set_controls_enabled(True)
+
+    @staticmethod
+    def _status_text(state: dict) -> str:
+        turn = state.get("turn", "white").capitalize()
+        other = "Black" if turn == "White" else "White"
+        texts = {
+            "playing": f"{turn} to move",
+            "check": f"{turn} to move — Check!",
+            "checkmate": f"Checkmate! {other} wins ({state.get('result', '')})",
+            "stalemate": "Stalemate — draw",
+            "draw_repetition": "Draw by threefold repetition",
+            "draw_fifty_moves": "Draw by the fifty-move rule",
+        }
+        return texts.get(state.get("state", ""), state.get("state", ""))
+
+    def _update_history(self, san: list) -> None:
         self.history_list.clear()
+        for i in range(0, len(san), 2):
+            black = san[i + 1] if i + 1 < len(san) else ""
+            self.history_list.addItem(f"{i // 2 + 1:>3}. {san[i]:<9}{black}")
+        self.history_list.scrollToBottom()
+
+    def _on_selection_changed(self, piece: Optional[dict]) -> None:
+        if piece is None:
+            self.piece_info.setText("Click any piece to inspect it.")
+            return
+        path = piece.get("path", [])
+        shown = (["…"] + path[-8:]) if len(path) > 8 else path
+        route = " → ".join(shown)
+        self.piece_info.setText(
+            f"{piece['color'].capitalize()} {piece['name']} (id {piece['id']})\n"
+            f"Value: {piece['value']}   Moves made: {piece['moves']}\n"
+            f"Path: {route}"
+        )
+
+    # ------------------------------------------------------------ user actions
+
+    def _on_move_requested(self, from_sq: int, to_sq: int) -> None:
+        if not self._state:
+            return
+        candidates = [m for m in self._state.get("legal_moves", [])
+                      if m["from"] == from_sq and m["to"] == to_sq]
+        promo = ""
+        if any(m["promo"] for m in candidates):
+            promo = PromotionDialog.ask(self._state["turn"], PIECES_DIR, self) or ""
+            if not promo:
+                return  # dialog closed - move cancelled
+        self._request({"cmd": "move", "from": from_sq, "to": to_sq, "promo": promo})
+
+    def _on_new_game(self) -> None:
+        self._request({"cmd": "new_game"})
+
+    def _on_undo(self) -> None:
+        self._request({"cmd": "undo"})
+
+    def _on_redo(self) -> None:
+        self._request({"cmd": "redo"})
+
+    def closeEvent(self, event) -> None:
+        self._adapter.stop()
+        super().closeEvent(event)
+
+
+def main() -> int:
+    app = QApplication(sys.argv)
+    window = MainWindow(EngineAdapter())
+    window.show()
+    return app.exec()
 
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
+    sys.exit(main())
