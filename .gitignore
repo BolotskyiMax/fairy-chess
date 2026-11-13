@@ -5,6 +5,8 @@
 *.ilk
 *.exp
 *.lib
+cpp_engine/build/
+*.log
 
 # Python artifacts
 __pycache__/
